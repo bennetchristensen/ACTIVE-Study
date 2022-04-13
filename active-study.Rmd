@@ -1,0 +1,113 @@
+---
+title: "Mini Project 2"
+author: "Ben Christensen"
+date: "3/29/2022"
+output: pdf_document
+bibliography: library.bib
+---
+\section{Introduction}
+The ACTIVE study was a longitudinal study on the elderly population(65+) with the goal of figuring out how effective cognitive training is at improving cognitive function. Participants were separated into three treatment groups and a control group on the basis of which cognitive process they would focus on: memory, reasoning, or speed of processing. All participants were administered the treatment right after the start of the study, and then a subset of the participants were administered booster treatments at around one year and then after three years [@pmid24417410;@pmid24385638]. 
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+library(splines)
+library(geeM)
+```
+```{r, echo= FALSE, message=FALSE, warning=FALSE}
+source('Cleaning.R') #Open Cleaning.R for information about variables.
+```
+
+```{r, echo=FALSE, message=FALSE}
+activeLong <- activeLong %>%
+    mutate(INTGRP = relevel(INTGRP, ref = "Control"))
+
+activeVector <- activeLong %>%
+  filter(Years==0)
+activeVector <- activeVector %>%
+  mutate(base_speed = Speed) %>%
+  select(AID, base_speed)
+
+activeLong2<-left_join(x = activeLong, y = activeVector, by = 'AID')
+activeLong2 <- activeLong2 %>%
+    mutate(speed_group = ifelse(INTGRP == "Speed of Processing Training", 1, 0))
+```
+The main research question of this project is to explore the effects of treatment groups, booster treatment, baseline speed, and years on speed of processing. More generally, our goal was to figure out the extent to which the treatment and subsequent boosters were effective in slowing down the deterioration of mental processing speed in the elderly. Mental deterioration in old age is not only devastating to the elderly, but also to their families, so trying to figure out the best intervention strategies can go a long way in improving the lives of some of our society’s most vulnerable citizens.
+
+\section{Models}
+
+```{r, message=FALSE, echo=FALSE}
+activeLong2 %>% 
+  group_by(INTGRP, Years, BOOSTER) %>%
+  summarise(mean_speed = mean(Speed, na.rm=TRUE)) %>%
+  ggplot(aes(y=mean_speed, x= Years, color=as.factor(INTGRP)))+
+  geom_point() +
+  geom_line() +
+  theme_classic() +
+  ggtitle("Mean Speed Over Time Across Treatment Groups") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("Years")+
+  ylab("Mean Speed")+
+  labs(color="Treatment Group:")+
+  scale_x_continuous(breaks = c(0, 0.25, 1, 2, 3, 5, 10)) +
+  theme(axis.text.x = element_text(angle= 90, vjust= 0.125, hjust=0)) +
+  facet_wrap(~BOOSTER, labeller="label_both")
+ 
+```
+Before getting to the models there are a few things that need to be explained, so to assist with this, see above a graph of mean speed scores against year, separated by treatment group. The non-speed treatment groups all behave in near identical manners, with slight variations in comparison to how different the speed of the processing group acts, regardless of booster status. For this reason, and to simplify the model, the control group, reasoning group, and memory group were all merged into one group so that a binary can be used in the place of looking at all four groups, given that three of those four groups will probably act the same anyways. 
+
+Getting to the models themselves, our two main options were a Mixed Effects Model and a GEE model. The Mixed Effects Model would have allowed us to collect BIC values, which would have allowed for very straightforward numerical comparisons. While this would have been very convenient, we opted for a GEE model in large part because of our uncertainty over which covariance structure to use. The Mixed Effects Model assumes that you are using the correct covariance structure for the model, so if you aren't then the standard errors aren't valid. With GEE models you get robust standard errors, which don't rely on assuming that the covariance structure is correct. Using this, we can then compare the model standard errors of our GEE model to the robust standard errors, and pick the correlation structure that matches the robust standard error most closely. 
+
+For our GEE models, we looked at speed as the response variable, and the base speed and  interaction between years, whether or not the person got speed training, and whether or not the person got booster treatment as the predictor variables. We filtered out year zero, as this was accounted for by the base speed. We tested three different correlation structures: ar(1), exchangeable, and independence. Of these three, the exchangeable structure was by far the closest to the actual structure. Comparing the sum of the absolute values of the differences between model standard errors and robust standard errors for each coefficient, the exchangeable structure was by far the closest to zero. For those reasons, we went with a GEE model with an exchangeable correlation structure.
+
+```{r, include=FALSE}
+activeLong2 %>%
+    drop_na(Years, BOOSTER, speed_group) %>%
+    filter(Years>0) %>%
+    lm(Speed ~ factor(Years)*speed_group*BOOSTER + base_speed, data = .) %>%
+    summary()
+```
+```{r, include=FALSE}
+independence <- activeLong2 %>%
+    drop_na(Years, BOOSTER, speed_group, base_speed, Speed) %>%
+    filter(Years>0) %>%
+    geem(Speed ~ factor(Years)*speed_group*BOOSTER + base_speed, data = ., id=AID, corstr= "independence") %>%
+    summary()
+independence
+```
+```{r, include=FALSE}
+exchangable <- activeLong2 %>%
+    drop_na(Years, BOOSTER, speed_group, base_speed, Speed) %>%
+    filter(Years>0) %>%
+    geem(Speed ~ factor(Years)*speed_group*BOOSTER + base_speed, data = ., id=AID, corstr= "exchangeable") %>%
+    summary()
+exchangable
+```
+```{r, include=FALSE}
+ar1 <- activeLong2 %>%
+    drop_na(Years, BOOSTER, speed_group, base_speed, Speed) %>%
+    filter(Years>0) %>%
+    geem(Speed ~ factor(Years)*speed_group*BOOSTER + base_speed, data = ., id=AID, corstr= "ar1") %>%
+    summary()
+ar1
+```
+```{r, include=FALSE}
+Coefficient_Names <- c(exchangable$coefnames, "Sum")
+exch<-sum(abs(exchangable$se.robust - exchangable$se.model))
+Exchangeable_Differences<- c(abs(exchangable$se.robust - exchangable$se.model), exch)
+ar<-sum(abs(x = ar1$se.robust - ar1$se.model))
+ar1_Differences<- c(abs(ar1$se.robust - ar1$se.model), ar)
+ind<-sum(abs(independence$se.robust - independence$se.model))
+Independence_Differences<- c(abs(independence$se.robust - independence$se.model), ind)
+pex <- c(exchangable$p, "NA")
+pind <- c(independence$p, "NA")
+par <- c(ar1$p, "NA")
+df1 <- data.frame(Coefficient_Names, Exchangeable_Differences, pex)
+df2 <- data.frame(Coefficient_Names, Independence_Differences, pind)
+df3 <- data.frame(Coefficient_Names, ar1_Differences, par)
+df <- data.frame(df1,df2,df3) %>%
+  select(Coefficient_Names, Exchangeable_Differences, ar1_Differences, Independence_Differences)
+df
+```
+
+\section{Conclusions}
+Based on the p values from our model, we can see that simply getting some form of treatment and getting some form of booster are not statistically significant. However, even ten years down the line, getting speed training and booster speed training are statistically significant. Not only that, but the estimates for those who got speed training and the booster was negative for every year, which means that compared to their non-speed group and non-booster counterparts, their mental processing remains much faster even ten years later. This would seem to imply that the speed group, along with the booster treatment are effective at improving speed of processing over time as the elderly age. However, something of note is that while the estimate for speed group alone is negative, showing that those in the speed group were faster than their non-speed group counterparts, the estimates for the interaction between speed group and each year are all positive because while the speed group is faster overall, as seen by the coefficient for the speed group being negative, but they don't stop the aging process, and so that gain right after treatment is counteracted over time, and because they are faster, they lose even more speed. In comparison to the speed group without the booster, the speed group with the booster is negative, showing that having those booster treatments further helps combat the effects of aging on speed of processing. In sum, our model suggests that there are long term(ten years) positive effects of not only the speed training intervention, but also the booster speed training. These trainings can help slow the deterioration of mental processing speed in old age.
+
+\section{Refrences}
